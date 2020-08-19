@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"crypto/md5"
+	"flag"
 	"fmt"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/chromedp"
 	"github.com/gnewton/jargo"
 	"html/template"
 	"io"
@@ -33,6 +35,77 @@ func reqByName(name string) {
 	}
 	fmt.Println(string(body))
 }
+func getCookies() []*http.Cookie {
+	var cookies = make([]*http.Cookie, 0, 8)
+	var tasks = chromedp.Tasks{
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			cks, err := network.GetAllCookies().Do(ctx)
+			if err != nil {
+				return err
+			}
+			for i, cookie := range cks {
+				log.Printf("chrome cookie %d: %+v", i, cookie)
+			}
+			//network.ClearBrowserCookies()
+			return nil
+		}),
+		chromedp.Navigate("https://mvnrepository.com"),
+		chromedp.WaitVisible(`#maincontent`, chromedp.ByID),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			cks, err := network.GetAllCookies().Do(ctx)
+			for _, ck := range cks {
+				cookies = append(cookies, &http.Cookie{
+					Name:  ck.Name,
+					Value: ck.Value,
+				})
+			}
+			return err
+		}),
+	}
+	err := chromedp.Run(ctx, tasks)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return cookies
+}
+
+func web(url string, version string) *[]MvnInfo {
+	var nodes []*cdp.Node
+	var tasks = chromedp.Tasks{
+		chromedp.Navigate(url),
+		chromedp.WaitVisible(`#maincontent`, chromedp.ByID),
+		/*chromedp.ActionFunc(func(ctx context.Context) error {
+			cookies, err := network.GetAllCookies().Do(ctx)
+			if err != nil {
+				return err
+			}
+			for i, cookie := range cookies {
+				log.Printf("chrome cookie %d: %+v", i, cookie)
+			}
+			return nil
+		}),*/
+		//xpath语法 a[1]表示第一个
+		chromedp.Nodes(`//div[@id='maincontent']//div[@class='im']//p[@class='im-subtitle']/a[2]`, &nodes),
+	}
+	err := chromedp.Run(ctx, tasks)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("get nodes:", len(nodes))
+	// print titles
+	var infoList = make([]MvnInfo, 0, 10)
+	for _, node := range nodes {
+		str := node.Attributes[1]
+		groupId := strings.Split(str, "/")[2]
+		artifactId := strings.Split(str, "/")[3]
+		infoList = append(infoList, MvnInfo{
+			GroupId:    groupId,
+			ArtifactId: artifactId,
+			Version:    version,
+		})
+	}
+	return &infoList
+}
 
 type MvnInfo struct {
 	GroupId      string
@@ -43,7 +116,23 @@ type MvnInfo struct {
 	Jar          string
 	Md5          string
 	Validate     bool
-	err          string
+	Err          string
+}
+
+var client = &http.Client{}
+
+func doReq(url string) (*http.Response, error) {
+	req, _ := http.NewRequest("GET", url, nil)
+	cookiesStr := ""
+	for _, ck := range cookies {
+		str := ck.Name + "=" + ck.Value + "; "
+		cookiesStr += str
+	}
+	//cookiesStr = cookiesStr[:len(cookiesStr)-2]
+	cookiesStr = "__cfduid=d450cfbf5c8cd1426549d9659f422e1c91597492696; cf_chl_prog=a19; cf_clearance=8ccf51c797b4b3441f2ba36aeb030347b8b57f2d-1597492796-0-1zbe325f03z894532f2z703ff5bc-250; MVN_SESSION=eyJhbGciOiJIUzI1NiJ9.eyJkYXRhIjp7InVpZCI6ImQ2NmUzMTcxLWRlZWUtMTFlYS1hYmZkLWRiNjdiNDZjOWMzNyJ9LCJleHAiOjE2MjkwMzIwNjQsIm5iZiI6MTU5NzQ5NjA2NCwiaWF0IjoxNTk3NDk2MDY0fQ.LP8-WzMxST4gLvtNui-MmFVtD72CiNdxzBk9k3g52Tg"
+	req.Header.Set("cookie", cookiesStr)
+	req.Header.Set("User-Agent", userAgent)
+	return client.Do(req)
 }
 
 func cli(name string) *[]MvnInfo {
@@ -54,20 +143,23 @@ func cli(name string) *[]MvnInfo {
 		headName = name[:index]
 		version = name[index+1:]
 	}
+	var fromJar = false
 	if version == "" { //从manifast中获取相关版本信息
 		version = getVerFromFile(name)
+		fromJar = true
 	}
+	var noVersion = false
+	if version == "" {
+		noVersion = true
+	}
+	url := reqUrl + headName
 	var infoList = make([]MvnInfo, 0, 10)
 	if version == "" {
 		return &infoList
 	}
-	client := &http.Client{}
-	req, _ := http.NewRequest("GET", reqUrl+headName, nil)
-	req.Header.Set("User-Agent",
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.105 Safari/537.36")
-	req.Header.Set("cookie",
-		"__cfduid=d824af0f6d448feddf63e3820f38c86d41596259564; _ga=GA1.2.714444043.1596259579; _gid=GA1.2.1104784891.1596259579; cf_clearance=769d6c5e799616c9d3f6d8fa322e3f329ba8745c-1596379785-0-1zef0c033azb041d86bzce278e85-150; MVN_SESSION=eyJhbGciOiJIUzI1NiJ9.eyJkYXRhIjp7InVpZCI6IjdmNjY3YjQxLWQzYjctMTFlYS05MTFmLTgxMzA0MjZkMGU4MCJ9LCJleHAiOjE2Mjc5MTY3NjMsIm5iZiI6MTU5NjM4MDc2MywiaWF0IjoxNTk2MzgwNzYzfQ.IPa-nxy9vxGS5DCrQ1NK8omwauaSTU3JTU5P4CET4xA")
-	resp, err := client.Do(req)
+	/*resp, err := doReq(url)
+	bytes, err := ioutil.ReadAll(resp.Body)
+	fmt.Println(string(bytes))
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
 		fmt.Println("read error", err)
@@ -97,7 +189,30 @@ func cli(name string) *[]MvnInfo {
 	})
 	noneVersionList = append(noneVersionList, MvnInfo{
 		Jar: name,
-	})
+	})*/
+
+	infoList = *web(url, version)
+	var idx = -1
+	for i, info := range infoList {
+		if info.ArtifactId == headName {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		fmt.Println("noMatch:" + headName)
+		infoList[0].Err += ",not_match"
+		infoList[0].ArtifactId = headName
+		infoList[0].GroupId = ""
+	} else if idx > 0 {
+		infoList[idx], infoList[0] = infoList[0], infoList[idx]
+	}
+	if fromJar {
+		infoList[0].Err += ",from_jar"
+	}
+	if noVersion {
+		infoList[0].Err += ",no_version"
+	}
 	return &infoList
 }
 
@@ -254,11 +369,13 @@ func buildMvn() {
 		jarIndex := strings.LastIndex(name, ".jar")
 		if jarIndex != -1 {
 			name = name[:jarIndex]
-			println("ready to query: " + name)
+			fmt.Println("ready to query: " + name)
 			infoList := cli(name)
 			if len(*infoList) > 0 {
-				info := getInfo(infoList)
-				if len(info.Md5) > 0 {
+				//info := getInfo(infoList)
+				info := (*infoList)[0]
+				versionFormat(&info)
+				/*if len(info.Md5) > 0 {
 					if !info.Validate {
 						info.err = "not_match"
 					}
@@ -267,9 +384,9 @@ func buildMvn() {
 				}
 				if info.Jar == "" {
 					info.Jar = name
-				}
-				fmt.Println(*info)
-				tplList = append(tplList, *info)
+				}*/
+				fmt.Println(info)
+				tplList = append(tplList, info)
 			}
 
 		}
@@ -305,13 +422,36 @@ func getInfo(infoList *[]MvnInfo) *MvnInfo {
 	}
 	return info
 }
-
+func getInfo2(infoList *[]MvnInfo) *MvnInfo {
+	var info = &MvnInfo{}
+	for i := 0; i < len(*infoList); i++ {
+		mvnInfo := &(*infoList)[i]
+		versionFormat(mvnInfo)
+		updateState(mvnInfo)
+		if mvnInfo.Validate {
+			info = mvnInfo
+			break
+		}
+	}
+	return info
+}
 func versionFormat(info *MvnInfo) {
 	var replaceMap = make(map[string]string, 0)
 	replaceMap["-20140208"] = ""
+	replaceMap[".RC1"] = ".RELEASE"
+	replaceMap["-r1364789"] = ""
+
 	version := info.Version
+	var change = false
 	for k, v := range replaceMap {
-		version = strings.Replace(version, k, v, -1)
+		if strings.Contains(version, k) {
+			change = true
+			info.Version = strings.Replace(version, k, v, -1)
+			break
+		}
+	}
+	if change {
+		info.Err += "ver_old:" + version
 	}
 }
 
@@ -357,7 +497,40 @@ func sortInfo(infoList *[]MvnInfo) {
 		}
 	}
 }
+
+var flagDevToolWsUrl = flag.String("devtools-ws-url", "ws://localhost:9222/devtools/page/D94AE8E9B5E4E8BEB52028259AAB565E", "DevTools WebSsocket URL")
+
+var userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.125 Safari/537.36`
+var ctx context.Context
+
+func initWeb() {
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", false), // debug使用
+		//chromedp.Flag("blink-settings", "imagesEnabled=false"),
+		chromedp.UserAgent(userAgent),
+	)
+
+	allocCtx, _ := chromedp.NewExecAllocator(context.Background(), opts...)
+
+	theCtx, _ := chromedp.NewContext(
+		allocCtx,
+		chromedp.WithLogf(log.Printf),
+	)
+	ctx = theCtx
+}
+func initWebRemote() {
+	allocCtx, _ := chromedp.NewRemoteAllocator(context.Background(), *flagDevToolWsUrl)
+	theCtx, _ := chromedp.NewContext(
+		allocCtx,
+	)
+	ctx = theCtx
+}
+
+var cookies = make([]*http.Cookie, 0)
+
 func main() {
+	initWebRemote()
+	//cookies = getCookies()
 	buildMvn()
 }
 func mvnTest() {
