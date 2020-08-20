@@ -10,15 +10,23 @@ import (
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"github.com/gnewton/jargo"
+	"github.com/tidwall/gjson"
 	"html/template"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 )
+
+var path = "lib/"
+var tplPath = "mvn.tpl"
+var mvnPath = "mvn.txt"
+
+var client = &http.Client{}
 
 func reqByName(name string) {
 	fmt.Println("Hello, world")
@@ -119,20 +127,28 @@ type MvnInfo struct {
 	Err          string
 }
 
-var client = &http.Client{}
+func runChrome(head bool) {
+	command := exec.Command("chrome-dev.bat")
+	command.Start()
+}
 
-func doReq(url string) (*http.Response, error) {
-	req, _ := http.NewRequest("GET", url, nil)
-	cookiesStr := ""
-	for _, ck := range cookies {
-		str := ck.Name + "=" + ck.Value + "; "
-		cookiesStr += str
-	}
-	//cookiesStr = cookiesStr[:len(cookiesStr)-2]
-	cookiesStr = "__cfduid=d450cfbf5c8cd1426549d9659f422e1c91597492696; cf_chl_prog=a19; cf_clearance=8ccf51c797b4b3441f2ba36aeb030347b8b57f2d-1597492796-0-1zbe325f03z894532f2z703ff5bc-250; MVN_SESSION=eyJhbGciOiJIUzI1NiJ9.eyJkYXRhIjp7InVpZCI6ImQ2NmUzMTcxLWRlZWUtMTFlYS1hYmZkLWRiNjdiNDZjOWMzNyJ9LCJleHAiOjE2MjkwMzIwNjQsIm5iZiI6MTU5NzQ5NjA2NCwiaWF0IjoxNTk3NDk2MDY0fQ.LP8-WzMxST4gLvtNui-MmFVtD72CiNdxzBk9k3g52Tg"
-	req.Header.Set("cookie", cookiesStr)
+func getWs(url string) string {
+	req, _ := http.NewRequest("GET", "http://"+url+"/json/list", nil)
 	req.Header.Set("User-Agent", userAgent)
-	return client.Do(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		runChrome(true)
+		return getWs(url)
+	}
+	b, err := ioutil.ReadAll(resp.Body)
+	str := string(b)
+	str = strings.Replace(str, "\r\n", "", -1)
+	str = strings.Replace(str, " ", "", -1)
+	var wsUrl = ""
+	wsUrl = gjson.Get(str, "..0.0.id").String() //感觉这个是个bug
+	var ws = "ws://" + url + "/devtools/page/" + wsUrl
+	fmt.Println(ws)
+	return ws
 }
 
 func cli(name string) *[]MvnInfo {
@@ -234,15 +250,6 @@ func getVerFromFile(name string) string {
 var reqUrl = "https://mvnrepository.com/search?q="
 var mvnUrl = "https://repo1.maven.org/maven2/"
 
-/*var repoUrls =map[string]string{
-	"Central":"https://repo1.maven.org/maven2/",
-	"Sonatype":"https://oss.sonatype.org/content/repositories/releases/",
-	"Spring Plugins":"https://repo.spring.io/plugins-release/",
-	"Spring Lib M":"https://repo.spring.io/libs-milestone/",
-	"Hortonworks": "https://repo.hortonworks.com/content/repositories/releases/",
-	"Jenkins":"https://repo.jenkins-ci.org/releases/",
-}*/
-
 var repoUrls = []string{
 	"https://repo1.maven.org/maven2/",
 	"https://oss.sonatype.org/content/repositories/releases/",
@@ -343,10 +350,6 @@ func checkMd5(info *MvnInfo) bool {
 	}
 	return false
 }
-
-var path = "lib/"
-var tplPath = "mvn.tpl"
-var mvnPath = "mvn.txt"
 
 func buildMvn() {
 	files, err := ioutil.ReadDir(path)
@@ -498,7 +501,7 @@ func sortInfo(infoList *[]MvnInfo) {
 	}
 }
 
-var flagDevToolWsUrl = flag.String("devtools-ws-url", "ws://localhost:9222/devtools/page/D94AE8E9B5E4E8BEB52028259AAB565E", "DevTools WebSsocket URL")
+var flagDevToolWsUrl = flag.String("devtools-ws-url", "ws://localhost:9222/devtools/page/D026C6B25AA8FC5397E0FC9125BDB894", "DevTools WebSsocket URL")
 
 var userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.125 Safari/537.36`
 var ctx context.Context
@@ -519,7 +522,8 @@ func initWeb() {
 	ctx = theCtx
 }
 func initWebRemote() {
-	allocCtx, _ := chromedp.NewRemoteAllocator(context.Background(), *flagDevToolWsUrl)
+	ws := getWs("localhost:9222")
+	allocCtx, _ := chromedp.NewRemoteAllocator(context.Background(), ws)
 	theCtx, _ := chromedp.NewContext(
 		allocCtx,
 	)
@@ -532,6 +536,7 @@ func main() {
 	initWebRemote()
 	//cookies = getCookies()
 	buildMvn()
+	//doReq("localhost:9222")
 }
 func mvnTest() {
 	var tplList = make([]MvnInfo, 2)
